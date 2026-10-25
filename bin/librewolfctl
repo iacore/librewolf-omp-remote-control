@@ -1,0 +1,290 @@
+#!/usr/bin/env bun
+// librewolfctl — operate a running LibreWolf.
+//
+// Three channels, chosen by what is asked:
+//   D-Bus remote  — open a URL/window in the instance that owns the bus name.
+//                   Needs nothing but a running browser.
+//   WebDriver BiDi (Remote Agent, --remote-debugging-port) — tabs, navigation,
+//                   JS, screenshots, cookies. Tab ids are session-scoped, so
+//                   `--tab` also accepts an index or a URL substring.
+//   Marionette (--marionette) — the same, plus the browser's own privileged JS
+//                   when it also started with --remote-allow-system-access.
+
+import { listInstances, open, pickInstance, sendArgs, TARGETS } from "../lib/lw.mjs";
+import { Bidi, DEFAULT_BIDI_PORT, matchTab } from "../lib/bidi.mjs";
+import { Marionette, DEFAULT_MARIONETTE_PORT } from "../lib/marionette.mjs";
+
+const USAGE = `librewolfctl — operate the running LibreWolf
+
+Remote control (D-Bus; no new process, no X11):
+  librewolfctl status [--json]
+  librewolfctl open <url>... [--target ${TARGETS.join("|")}] [--instance <pid|profile|bus-name>]
+  librewolfctl prefs [--instance <pid|profile|bus-name>]
+  librewolfctl send -- <arg>... [--instance <pid|profile|bus-name>]
+
+Page control (WebDriver BiDi; needs --remote-debugging-port):
+  librewolfctl tabs                                    index, id, url of every context
+  librewolfctl new [url] [--foreground]                open a tab; prints its index
+  librewolfctl nav <url> --tab <sel>                   navigate
+  librewolfctl eval <js> --tab <sel>                   evaluate JS, print the value
+  librewolfctl shot <file.png> --tab <sel>             screenshot the tab
+  librewolfctl close <sel>                             close a tab
+  librewolfctl cookies [--domain <suffix>] [--values]  cookie names; values only with --values
+
+  --tab <sel> is an index from \`tabs\`, a context id, or a substring of the url.
+
+Browser control (Marionette; needs --marionette, plus --remote-allow-system-access
+for anything privileged):
+  librewolfctl chrome <js>                             run JS as the system principal
+  librewolfctl context                                 report the Marionette context
+
+Housekeeping:
+  librewolfctl session-end                             clear a leaked session — the
+                                                       browser holds exactly one, and
+                                                       a leak answers every later
+                                                       client "Maximum number of
+                                                       active sessions"
+
+Global: --bidi-port <n> (${DEFAULT_BIDI_PORT})   --marionette-port <n> (${DEFAULT_MARIONETTE_PORT})
+`;
+
+function fail(msg, code = 1) {
+  process.stderr.write(`librewolfctl: ${msg}\n`);
+  process.exit(code);
+}
+
+const WITH_VALUE = new Set([
+  "--target",
+  "--instance",
+  "--tab",
+  "--domain",
+  "--bidi-port",
+  "--marionette-port",
+  "--port",
+]);
+
+/** Split argv into positionals, `--opt value` pairs, bare flags, `--` passthrough. */
+function parse(argv) {
+  const pos = [];
+  const opt = {};
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") {
+      rest.push(...argv.slice(i + 1));
+      break;
+    }
+    if (WITH_VALUE.has(a)) {
+      const v = argv[++i];
+      if (v === undefined) fail(`${a} needs a value`);
+      opt[a.slice(2)] = v;
+    } else if (a.startsWith("--")) opt[a.slice(2)] = true;
+    else pos.push(a);
+  }
+  return { pos, opt, rest };
+}
+
+const bidiPort = (opt) => Number(opt["bidi-port"] ?? opt.port ?? DEFAULT_BIDI_PORT);
+const marPort = (opt) => Number(opt["marionette-port"] ?? DEFAULT_MARIONETTE_PORT);
+
+async function withBidi(opt, fn) {
+  let bidi;
+  try {
+    bidi = await Bidi.connect(bidiPort(opt));
+  } catch (e) {
+    fail(e.message, 3);
+  }
+  try {
+    await bidi.startSession({});
+    return await fn(bidi);
+  } finally {
+    await bidi.endSession();
+    bidi.close();
+  }
+}
+
+/** Read a Marionette session, optionally in the chrome/system context. */
+async function withMarionette(opt, fn) {
+  let mar;
+  try {
+    mar = await Marionette.connect(marPort(opt));
+    await mar.newSession({});
+  } catch (e) {
+    fail(e.message, 3);
+  }
+  try {
+    return await fn(mar);
+  } finally {
+    await mar.deleteSession();
+    mar.close();
+  }
+}
+
+/**
+ * A BiDi context id is minted per session, so an id printed by an earlier run
+ * usually cannot be resolved later. Accept an id, a top-level index, or a url
+ * substring instead.
+ */
+async function pickTab(bidi, sel) {
+  const tabs = await bidi.listTabs();
+  if (sel === undefined) {
+    fail("pick a tab with --tab <index|id|url-substring> (see `librewolfctl tabs`)");
+  }
+  try {
+    return matchTab(tabs, sel);
+  } catch (e) {
+    fail(`${e.message} — \`librewolfctl tabs\` lists them`);
+  }
+}
+
+async function showTabs(bidi, json) {
+  const tabs = await bidi.listTabs();
+  const top = tabs.filter((t) => t.parent === null);
+  if (json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          tabs: tabs.map((t) => ({
+            ...t,
+            index: t.parent === null ? top.indexOf(t) : null,
+          })),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return;
+  }
+  let topIndex = 0;
+  for (const t of tabs) {
+    const idx = t.parent === null ? String(topIndex++) : "  └";
+    process.stdout.write(`${idx}\t${t.id}\t${t.url ?? ""}\n`);
+  }
+  process.stdout.write(`(${top.length} tabs)\n`);
+}
+
+function showStatus(json) {
+  const instances = listInstances();
+  if (json) {
+    process.stdout.write(JSON.stringify({ instances }, null, 2) + "\n");
+    return;
+  }
+  if (instances.length === 0) {
+    process.stdout.write("no running LibreWolf instance owns a session-bus remote name\n");
+    return;
+  }
+  for (const i of instances) {
+    process.stdout.write(
+      `pid ${i.pid}\t${i.profileName ?? "?"}\t${i.version ?? "?"}\t${i.busName}\n`,
+    );
+    if (i.profile) process.stdout.write(`  profile ${i.profile}\n`);
+  }
+}
+
+const { pos, opt, rest } = parse(process.argv.slice(2));
+const cmd = pos.shift() ?? "status";
+
+try {
+  if (cmd === "status" || cmd === "ls") {
+    showStatus(Boolean(opt.json));
+  } else if (cmd === "open") {
+    if (pos.length === 0) fail("open needs at least one URL");
+    const inst = pickInstance(opt.instance);
+    open(inst, pos, { target: opt.target ?? "tab" });
+    process.stdout.write(
+      `opened ${pos.length} url${pos.length === 1 ? "" : "s"} in ${inst.profileName ?? inst.busName}\n`,
+    );
+  } else if (cmd === "prefs") {
+    const inst = pickInstance(opt.instance);
+    open(inst, null, { target: "preferences" });
+    process.stdout.write(`opened preferences in ${inst.profileName}\n`);
+  } else if (cmd === "send") {
+    if (rest.length === 0) fail("send needs arguments after --");
+    sendArgs(pickInstance(opt.instance), rest);
+    process.stdout.write(`sent ${JSON.stringify(rest)}\n`);
+  } else if (cmd === "tabs") {
+    await withBidi(opt, (b) => showTabs(b, Boolean(opt.json)));
+  } else if (cmd === "new") {
+    const url = pos.shift();
+    await withBidi(opt, async (b) => {
+      const id = await b.createTab(url, { background: !opt.foreground });
+      const tabs = (await b.listTabs()).filter((t) => t.parent === null);
+      const index = tabs.findIndex((t) => t.id === id);
+      process.stdout.write(`${index}\t${id}\t${url ?? "about:blank"}\n`);
+    });
+  } else if (cmd === "nav") {
+    const url = pos.shift();
+    if (!url) fail("nav needs a URL");
+    await withBidi(opt, async (b) => {
+      const tab = await pickTab(b, opt.tab);
+      await b.navigate(tab.id, url);
+      process.stdout.write(`navigated ${tab.id} to ${url}\n`);
+    });
+  } else if (cmd === "eval") {
+    const js = pos.shift();
+    if (!js) fail("eval needs an expression");
+    await withBidi(opt, async (b) => {
+      const tab = await pickTab(b, opt.tab);
+      const value = Bidi.value(await b.evaluate(tab.id, js));
+      process.stdout.write(
+        opt.json ? JSON.stringify(value) + "\n" : `${value === undefined ? "(undefined)" : value}\n`,
+      );
+    });
+  } else if (cmd === "shot") {
+    const file = pos.shift();
+    if (!file) fail("shot needs an output path");
+    await withBidi(opt, async (b) => {
+      const tab = await pickTab(b, opt.tab);
+      const png = await b.screenshot(tab.id, { asBase64: false });
+      await Bun.write(file, png);
+      process.stdout.write(`${file}\t${png.length} bytes\t${tab.url ?? ""}\n`);
+    });
+  } else if (cmd === "close") {
+    const sel = pos.shift();
+    if (!sel) fail("close needs a tab selector (see `librewolfctl tabs`)");
+    await withBidi(opt, async (b) => {
+      const tab = await pickTab(b, sel);
+      await b.closeTab(tab.id);
+      process.stdout.write(`closed ${tab.url ?? tab.id}\n`);
+    });
+  } else if (cmd === "cookies") {
+    await withBidi(opt, async (b) => {
+      const all = await b.cookies();
+      const hit = opt.domain ? all.filter((c) => (c.domain ?? "").includes(opt.domain)) : all;
+      if (opt.json) {
+        process.stdout.write(JSON.stringify(hit, null, 2) + "\n");
+        return;
+      }
+      for (const c of hit) {
+        const shown = opt.values ? `\t${String(c.value).slice(0, 40)}` : "";
+        process.stdout.write(`${c.domain}\t${c.name}${shown}\n`);
+      }
+      process.stdout.write(`(${hit.length} cookies)\n`);
+    });
+  } else if (cmd === "chrome") {
+    const js = pos.shift();
+    if (!js) fail("chrome needs an expression");
+    await withMarionette(opt, async (mar) => {
+      const value = await mar.chrome(js);
+      process.stdout.write(`${value === undefined ? "(undefined)" : JSON.stringify(value)}\n`);
+    });
+  } else if (cmd === "context") {
+    await withMarionette(opt, async (mar) => {
+      process.stdout.write(`${JSON.stringify(await mar.getContext())}\n`);
+    });
+  } else if (cmd === "session-end" || cmd === "session-clear") {
+    const mar = await Marionette.connect(marPort(opt)).catch((e) => fail(e.message, 3));
+    try {
+      await mar.deleteSession();
+      process.stdout.write("session cleared\n");
+    } finally {
+      mar.close();
+    }
+  } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
+    process.stdout.write(USAGE);
+  } else {
+    fail(`unknown command ${cmd}\n\n${USAGE}`);
+  }
+} catch (e) {
+  fail(e.message);
+}

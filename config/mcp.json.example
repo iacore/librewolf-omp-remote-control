@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "librewolf-ctl": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["/home/USER/.local/share/librewolf-omp-remote-control/mcp/server.mjs"]
+    }
+  }
+}

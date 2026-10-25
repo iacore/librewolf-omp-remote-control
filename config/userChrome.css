@@ -1,0 +1,11 @@
+/* Hide the "browser is under remote control" cue that Gecko draws whenever it
+   is started with --marionette or --remote-debugging-port: the robot icon in
+   the urlbar and the red 45-degree stripes on .urlbar-background. The flags
+   stay on, so the control surface keeps working. */
+:root[remotecontrol] #remote-control-box {
+  display: none !important;
+}
+
+:root[remotecontrol] .urlbar-background {
+  background-image: none !important;
+}

@@ -1,0 +1,27 @@
+[Desktop Entry]
+Type=Application
+Name=LibreWolf
+GenericName=Web Browser
+Comment=Browse the web, with a remote-control surface enabled
+Exec=/usr/lib/librewolf/librewolf --remote-debugging-port=9223 --marionette %u
+Icon=librewolf
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+Actions=new-window;new-private-window;privileged-debug;no-remote;
+
+[Desktop Action new-window]
+Name=Open a New Window
+Exec=/usr/lib/librewolf/librewolf --remote-debugging-port=9223 --marionette --new-window %u
+
+[Desktop Action new-private-window]
+Name=Open a New Private Window
+Exec=/usr/lib/librewolf/librewolf --remote-debugging-port=9223 --marionette --private-window %u
+
+[Desktop Action privileged-debug]
+Name=LibreWolf (privileged debug)
+Exec=/usr/lib/librewolf/librewolf --remote-debugging-port=9223 --marionette --remote-allow-system-access %u
+
+[Desktop Action no-remote]
+Name=LibreWolf (no remote control)
+Exec=/usr/lib/librewolf/librewolf --no-remote %u
