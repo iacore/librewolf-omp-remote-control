@@ -1,101 +1,100 @@
 # librewolf-omp-remote-control
 
-Make LibreWolf fully remote-controllable — open URLs, enumerate and drive tabs, run page JS, screenshot, read cookies, and (opt-in) run privileged browser JS — with no extension, no second browser process, and no X11 automation. Ships a small CLI, an MCP stdio server for agent harnesses such as [omp](https://github.com/can1357/oh-my-pi), the desktop-entry and profile changes that enable it, and an optional patch that hides the automation flag from pages.
+**Remote debugging and browser automation for LibreWolf and Firefox** — a CLI and an MCP server that drive a running browser over WebDriver BiDi, Marionette and D-Bus. No extension, no second browser process, no X11 automation, no Selenium, no Playwright, no Puppeteer.
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![LibreWolf 158](https://img.shields.io/badge/LibreWolf-158-00a6a6.svg)](https://librewolf.net)
+[![WebDriver BiDi](https://img.shields.io/badge/protocol-WebDriver%20BiDi-6e4aff.svg)](https://w3c.github.io/webdriver-bidi/)
+[![MCP](https://img.shields.io/badge/MCP-stdio-black.svg)](https://modelcontextprotocol.io)
+
+```sh
+librewolfctl status|open|prefs|send                 # D-Bus, any running instance
+librewolfctl tabs|new|nav|eval|shot|close|cookies   # page control (BiDi)
+librewolfctl chrome|context|session-end             # browser internals (Marionette)
 ```
-librewolfctl status|open|prefs|send          # D-Bus: works on any running instance
-librewolfctl tabs|new|nav|eval|shot|close|cookies   # page control: needs --remote-debugging-port
-librewolfctl chrome|context|session-end      # browser internals: needs --marionette
-```
 
-## Why three channels
+If you searched for any of these, this is the project:
 
-LibreWolf (Gecko) exposes three independent remote surfaces. They need different launch flags and can do different things; this project uses each for what it is good at.
+- *LibreWolf remote debugging* / *enable remote debugging in LibreWolf*
+- *Firefox MCP server* / *control Firefox from an AI agent*
+- *WebDriver BiDi client for Firefox without Selenium*
+- *Marionette client in JavaScript/Bun*
+- *hide `navigator.webdriver`* / *navigator.webdriver false Firefox*
+- *Firefox sign-in wall "There was a problem with verification"*
+- *Firefox automation without geckodriver*
 
-| channel | needs the browser started with | can do |
+## What it can do
+
+| task | channel | command |
 |---|---|---|
-| D-Bus remote | nothing | open a URL, window, private window, preferences, search — handed to the already-running instance |
-| WebDriver BiDi | `--remote-debugging-port=9223` | list/create/close tabs, navigate, evaluate JS, screenshots, cookies, synthetic input |
-| Marionette | `--marionette` (2828), plus `--remote-allow-system-access` for privileged work | everything above, and system-principal JS: `Services`, prefs, profile path, other windows |
+| open a URL, window, private window in the running browser | D-Bus | `librewolfctl open <url>...` |
+| list, create, navigate, close tabs | BiDi | `librewolfctl tabs\|new\|nav\|close` |
+| evaluate JavaScript in a page | BiDi | `librewolfctl eval '<js>' --tab <sel>` |
+| screenshot a tab to PNG | BiDi | `librewolfctl shot out.png --tab <sel>` |
+| read cookies (names, values with `--values`) | BiDi | `librewolfctl cookies` |
+| run system-principal JS: `Services`, prefs, profile path | Marionette | `librewolfctl chrome '<expr>'` |
+| expose all of the above to an MCP agent | MCP stdio | `mcp/server.mjs` |
 
-A wrong D-Bus bus name or wrong argument offsets still returns a successful reply and opens nothing. Verify that path by the page loading, never by the call's return value.
+All of it attaches to a browser that is already running. The browser keeps its own profile, logins, extensions and session — nothing is launched in a separate automation profile.
 
-One instance takes one profile, and the browser holds exactly one WebDriver session across BiDi and Marionette. A client that exits without `session.end` blocks every later client with `Maximum number of active sessions`; restart the browser (or, for Marionette, use `librewolfctl session-end`).
-
-## Install
-
-The examples assume the repository lives at `~/.local/share/librewolf-omp-remote-control`; any path works, but the MCP and desktop entries must point at the real one.
+## Quick start
 
 ```sh
 git clone https://github.com/iacore/librewolf-omp-remote-control.git \
   ~/.local/share/librewolf-omp-remote-control
 ln -s ~/.local/share/librewolf-omp-remote-control/bin/librewolfctl ~/.local/bin/librewolfctl
+
+# 1. start LibreWolf with the remote flags on every launch
+cp ~/.local/share/librewolf-omp-remote-control/config/librewolf.desktop \
+   ~/.local/share/applications/librewolf.desktop
+
+# 2. profile switches (background hand-off, enable userChrome.css)
+cat ~/.local/share/librewolf-omp-remote-control/config/user.js >> <profile>/user.js
+mkdir -p <profile>/chrome
+cp ~/.local/share/librewolf-omp-remote-control/config/userChrome.css <profile>/chrome/
+
+# 3. restart LibreWolf, then
+librewolfctl tabs
+librewolfctl eval 'document.title' --tab 0
 ```
 
-Requirements: `bun` (CLI and MCP server), `dbus-send` and `busctl` (D-Bus channel), and LibreWolf. The stealth installer additionally needs `unzip`, `zip`, and a privileged runner (`doas` in the examples). Nothing here launches a browser; it attaches to one that is already running.
+Full setup, including the optional MCP registration, is in [docs/install.md](docs/install.md).
 
-### 1. Start LibreWolf with the remote flags
+## Three channels, and why
 
-LibreWolf's packaged desktop entry starts it without any remote surface. Override the entry for the current user — this is the change that makes every normal launch drivable:
+LibreWolf (Gecko) exposes three independent remote surfaces with different launch flags and reach:
 
-```sh
-mkdir -p ~/.local/share/applications
-cp config/librewolf.desktop ~/.local/share/applications/librewolf.desktop
+| channel | needs | can do |
+|---|---|---|
+| D-Bus remote | nothing | hand a URL/window/preferences request to the already-running instance |
+| WebDriver BiDi | `--remote-debugging-port=9223` | tabs, navigation, JS evaluation, screenshots, cookies, synthetic input |
+| Marionette | `--marionette` (2828), plus `--remote-allow-system-access` for privileged work | everything above, and system-principal JS: `Services`, prefs, profile path, other windows |
+
+A wrong D-Bus bus name or wrong argument offsets still returns a successful reply and opens nothing — verify by the page loading, never by the return value. One profile takes one instance, and the browser holds exactly one WebDriver session across BiDi and Marionette.
+
+## MCP server
+
+The same client is an MCP stdio server, so an agent can drive the user's real browser instead of a headless copy:
+
+```json
+{
+  "mcpServers": {
+    "librewolf-ctl": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["/home/USER/.local/share/librewolf-omp-remote-control/mcp/server.mjs"]
+    }
+  }
+}
 ```
 
-`config/librewolf.desktop` starts the browser with `--remote-debugging-port=9223 --marionette` on every `Exec` line. 9222 is avoided because Chromium commonly holds it. The entry also carries:
+Tools: `librewolf_status`, `librewolf_open`, `librewolf_tabs`, `librewolf_new`, `librewolf_nav`, `librewolf_eval`, `librewolf_shot`, `librewolf_close`, `librewolf_cookies`, `librewolf_chrome`, `librewolf_session_end`. Written for [omp](https://github.com/can1357/oh-my-pi); any MCP client that speaks stdio works.
 
-- a **privileged debug** action that adds `--remote-allow-system-access` — that flag lets any local process run code as the browser, so it is not on the normal launches;
-- a **no remote control** action (`--no-remote`, no flags) for sites whose challenge refuses a drivable browser.
+## Stealth mode: make `navigator.webdriver` false
 
-Any local process can drive the browser while these flags are on. Treat the profile as trusted-local only.
+Firefox publishes `isBrowserAutomation` to every content process while either remote server runs, so pages see `navigator.webdriver === true`. Some sign-in walls read that property and refuse the submit before checking credentials. Cloudflare's dashboard is the measured case: it answers *"There was a problem with verification. Please reload and try again."*
 
-### 2. Profile prefs
-
-Copy the relevant lines from `config/user.js` into `<profile>/user.js`. They:
-
-- hand links opened from other applications to background tabs (`browser.tabs.loadDivertedInBackground`);
-- enable `chrome/userChrome.css` (`toolkit.legacyUserProfileCustomizations.stylesheets`).
-
-### 3. Hide the remote-control cue (optional)
-
-Every launch with either flag draws a robot icon in the urlbar and red 45-degree stripes on the address bar. `config/userChrome.css` hides both while leaving the flags on:
-
-```css
-:root[remotecontrol] #remote-control-box { display: none !important; }
-:root[remotecontrol] .urlbar-background { background-image: none !important; }
-```
-
-Copy that file to `<profile>/chrome/userChrome.css`. `browser.chrome.disableRemoteControlCueForTests` does not suppress the cue; the pref's check also requires `Cu.isInAutomation`.
-
-### 4. Register the MCP server (optional, for agent harnesses)
-
-Merge `config/mcp.json.example` into the harness's MCP configuration (for omp: `~/.omp/agent/mcp.json`), replacing the path. The server exposes `librewolf_status`, `librewolf_open`, `librewolf_tabs`, `librewolf_new`, `librewolf_nav`, `librewolf_eval`, `librewolf_shot`, `librewolf_close`, `librewolf_cookies`, `librewolf_chrome`, and `librewolf_session_end`. Most harnesses load MCP configuration at session start; reload it after adding the entry.
-
-## Stealth mode: `navigator.webdriver`
-
-Firefox publishes `isBrowserAutomation` to every content process whenever either server runs, so pages read `navigator.webdriver === true`. Some sign-in walls — Cloudflare's dashboard is the measured case — read that value and refuse the submit before checking credentials.
-
-`patch/` contains a two-module patch to the JavaScript in `/usr/lib/librewolf/omni.ja`:
-
-| file | change |
-|---|---|
-| `chrome/remote/content/components/RemoteAgent.sys.mjs` | `updateWebdriverActiveFlag()` writes `false` for `RemoteAgent:IsBrowserAutomationRunning` |
-| `chrome/remote/content/components/Marionette.sys.mjs` | same for `Marionette:IsBrowserAutomationRunning` — Marionette is a second writer and runs on every desktop-entry launch |
-
-Both servers keep listening and the browser stays drivable; only the advertised flag is suppressed. `SHARED_DATA_ACTIVE_KEY` is untouched, so the chrome-side gates (certificate-override prompt, translations, update suppression) and the remote-control cue behave as before.
-
-`remote.stealth.enabled` (default `true`) gates the behaviour; set it to `false` in a profile to restore upstream semantics.
-
-Apply after every LibreWolf package upgrade:
-
-```sh
-patch/apply-stealth.sh
-```
-
-The script keeps the pristine archive at `/usr/lib/librewolf/omni.ja.dist`, rebuilds `omni.ja` with the patched modules, installs it with `doas`, and removes every profile's `~/.cache/librewolf/*/startupCache`. Clearing that cache is required: chrome-module bytecode survives an `omni.ja` replacement, so a restarted browser otherwise keeps running the old function (observed: a patched `RemoteAgent` took effect while a freshly patched `Marionette` stayed cached). Set `LIBREWOLF_LIB` to patch a non-standard install location.
-
-Measured with LibreWolf 158.0, throwaway profiles under `xvfb-run`, same submit (email filled, password empty) to a Cloudflare-hosted dashboard:
+`patch/` suppresses the published flag in both writers — `RemoteAgent.sys.mjs` and `Marionette.sys.mjs` — while leaving both servers listening. The browser stays drivable; only the advertisement disappears.
 
 | launch | `navigator.webdriver` | submit answer |
 |---|---|---|
@@ -103,24 +102,43 @@ Measured with LibreWolf 158.0, throwaway profiles under `xvfb-run`, same submit 
 | both flags, unpatched | `true` | verification error |
 | both flags, patched `omni.ja` | `false` | `Password is required.` |
 
-The tell is the flag, not the listening port or the ~100 "recommended" prefs the Remote Agent applies: a BiDi preload script that reports `false` in every realm — including the challenge's cross-origin iframe — clears the wall without touching either. A script injected only into the top document does not, because the challenge runs in a child frame.
+```sh
+patch/apply-stealth.sh          # after every LibreWolf upgrade
+```
 
-Patched modules are redistributed from LibreWolf/Gecko under the MPL-2.0; they are separate files and keep their MPL headers. Everything else here is MIT.
+Why both files, why the startup cache must be cleared, and the measurement method: [docs/stealth.md](docs/stealth.md).
+
+## Documentation
+
+- [Installing and configuring](docs/install.md) — desktop entry, profile prefs, cue suppression, MCP registration, permissions.
+- [Stealth mode](docs/stealth.md) — the `navigator.webdriver` patch, cache invalidation, verification.
+- [Troubleshooting](docs/troubleshooting.md) — session leaks, port conflicts, stale bytecode, cues, focus.
+- [All changes and rationale](CHANGES.md) — every LibreWolf and omp modification, and what is deliberately out of scope.
 
 ## Verified
 
-Against LibreWolf 158.0:
+Against LibreWolf 158.0 on Linux: D-Bus open (six URLs in ~0.1 s), BiDi tabs/new/nav/eval/shot/close/cookies, Marionette privileged JS, eight MCP calls over one stdio session, and the stealth table above with BiDi still working after the patch.
 
-- D-Bus: `open` reaches a local probe server; `open <six urls>` opens all six in ~0.1 s.
-- BiDi: `tabs`, `new`, `nav`, `eval`, `shot` (PNG bytes written), `close`, `cookies`.
-- Marionette: `chrome` returns the browser's privileged JS result; without `--remote-allow-system-access` it answers `System access is required`.
-- MCP: eight tool calls over one stdio session returned the expected results.
-- Stealth: values in the table above, with BiDi still working after the patch.
+## FAQ
+
+**Does this use geckodriver or Selenium?** No. It talks to Gecko's own Remote Agent (WebDriver BiDi) and Marionette protocols over a WebSocket and a TCP socket. There is no driver binary and no `webdriver` HTTP server.
+
+**Is it Playwright or Puppeteer?** No. Those drive Chromium (and Playwright can drive patched Firefox builds, not an installed LibreWolf). This drives the browser the user is already using, with its real profile.
+
+**Why not `--headless`?** The point is the real session: existing logins, cookies, extensions and window. Headless gives up exactly what makes the browser worth attaching to.
+
+**Can it drive a different Firefox-based browser?** The client speaks the protocols, not LibreWolf-specific APIs; the desktop entry and the stealth patch are LibreWolf/Gecko paths and may need adjusting for another build.
+
+**Is the browser exposed to other local users?** It listens on `127.0.0.1` only, with no authentication. Treat the profile as trusted-local while the flags are on.
 
 ## Limits
 
 - Tab listing shows browsing contexts only: no titles, no window grouping, no "active tab".
-- `cookies` reads; it cannot set or delete. BiDi `storage.setCookie` / `deleteCookies` in `lib/bidi.mjs` can be exposed.
+- `cookies` reads; it cannot set or delete. BiDi `storage.setCookie` / `deleteCookies` exist in `lib/bidi.mjs` but are not exposed.
 - `--bidi-port` / `--marionette-port` are exercised at 9223/2828 only.
 - No extension is installed, so extension-based page tooling cannot reach this browser.
-- The stealth patch is tied to a Firefox 158-era module layout; re-check the file names after a major upgrade.
+- The stealth patch is tied to a Firefox 158-era module layout; re-check file names after a major upgrade.
+
+## License
+
+MIT, except the patched Gecko modules under `patch/`, which are MPL-2.0 and keep their headers.
